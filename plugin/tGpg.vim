@@ -1,10 +1,11 @@
 " tGpg.vim -- Yet another plugin for encrypting files with gpg
-" @Author:      Thomas Link (mailto:samul AT web de?subject=vim-tGpg)
+" @Author:      Thomas Link (mailto:micathom AT gmail com?subject=vim-tGpg)
 " @Website:     http://www.vim.org/account/profile.php?user_id=4037
 " @License:     GPL (see http://www.gnu.org/licenses/gpl.txt)
 " @Created:     2006-12-31.
-" @Last Change: 2007-06-13.
-" @Revision:    0.3.755
+" @Last Change: 2007-12-28.
+" @Revision:    0.4.895
+" GetLatestVimScripts: 1751 1 tGpg.vim
 "
 " TODO:
 " - Remove gpg messages from the top of the file & display them with 
@@ -14,93 +15,213 @@
 " - test multiple recipients
 " - passphrase vs multiple recipients?
 " - signing & verification (embedded vs detached)
-" - randomized g:tgpgRotTable[AB]
 " - save cached values between sessions in a gpg encoded file?
+
 
 if &cp || exists("loaded_tgpg") "{{{2
     finish
 endif
-let loaded_tgpg = 3
+let loaded_tgpg = 4
 
-if !exists(':TAssert') "{{{2
-    command! -nargs=* -bang TAssert :
-    command! -nargs=* -bang TAssertBegin :
-    command! -nargs=* -bang TAssertEnd :
+
+if !exists('g:tgpg_timeout')
+    " Reset cached passwords after N seconds.
+    " 1800 ... 30 Minutes
+    let g:tgpg_timeout = 1800 "{{{2
 endif
 
-if !exists('g:tgpgMode') | let g:tgpgMode = 'symmetric' | endif "{{{2
-
-" 'sign'
-if !exists('g:tgpgModes') | let g:tgpgModes = ['symmetric', 'encrypt', 'clearsign'] | endif "{{{2
-
-if !exists('g:tgpgPattern_symmetric') "{{{2
-    let g:tgpgPattern_symmetric = g:tgpgMode == 'symmetric' ? '*.\(gpg\|asc\|pgp\)' : ''
+if !exists('g:tgpg_gpg_cmd')
+    " The gpg command. Should be a full filename.
+    let g:tgpg_gpg_cmd = '/usr/bin/gpg' "{{{2
 endif
-if !exists('g:tgpgWrite_symmetric') "{{{2
-    let g:tgpgWrite_symmetric = '!gpg %{G_OPTIONS} %{B_OPTIONS} %{PASSPHRASE} -o %{FILE} -c'
+" if !executable(g:tgpg_gpg_cmd)
+"     echom 'tGpg: Not an executable g:tgpg_gpg_cmd='. string(g:tgpg_gpg_cmd)
+" endif
+let s:tgpg_gpg_cmd = g:tgpg_gpg_cmd
+
+if !exists('g:tgpg_gpg_md5_check')
+    " The command to calculate the md5 checksum.
+    let g:tgpg_gpg_md5_check = 'md5sum '. s:tgpg_gpg_cmd "{{{2
+endif
+let s:tgpg_gpg_md5_check = g:tgpg_gpg_md5_check
+
+if !exists('g:tgpg_gpg_md5_sum')
+    " The known md5 checksum of gpg binary.
+    " If empty, the binary's integrity won't be checked.
+    let g:tgpg_gpg_md5_sum = '' "{{{2
+endif
+let s:tgpg_gpg_md5_sum = g:tgpg_gpg_md5_sum
+if empty(s:tgpg_gpg_md5_check) && !empty(s:tgpg_gpg_md5_sum)
+    echoerr 'tGpg: g:tgpg_gpg_md5_check is empty but g:tgpg_gpg_md5_sum is set'
+endif
+
+if !exists('g:tgpg_options')
+    " Set these options during read/write operations.
+    let g:tgpg_options = {'verbosefile': '', 'verbose': 0,} "{{{2
+endif
+
+if !exists('g:tgpg_registers')
+    " Reset these registers (eg the clipboard) after leaving/deleting a 
+    " gpg encoded buffer.
+    let g:tgpg_registers = '"-/_*+' "{{{2
+    " .:%#
+    " let g:tgpg_registers = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"-/_*+~'
+endif
+
+if !exists('g:tgpgCachePW')
+    " 2 ... cache passwords
+    " 1 ... buffer-wise caching only???
+    " 0 ... disable caching
+    let g:tgpgCachePW = 2 "{{{2
+endif
+
+if !exists('g:tgpgBackup')
+    " When writing, make backups (in case something goes wrong).
+    let g:tgpgBackup = 1 "{{{2
+endif
+
+if !exists('g:tgpgMode')
+    " The default run mode. Pre-defined values include:
+    " - symmetric (default)
+    " - encrypt
+    " - clearsign
+    " See also |g:tgpgModes|
+    let g:tgpgMode = 'symmetric' "{{{2
+endif
+
+if !exists('g:tgpgModes')
+    " A list of known modes.
+    let g:tgpgModes = ['symmetric', 'encrypt', 'clearsign'] "{{{2
+    " 'sign'
+endif
+
+" :doc:
+" -----------------------------------------------------------------------
+" Mode definitions~
+"
+" The template values are returned by functions 
+" TGpgUserInput_{FIELD}(params).
+
+if !exists('g:tgpgPattern_symmetric')
+    let g:tgpgPattern_symmetric = g:tgpgMode == 'symmetric' ? '*.\(gpg\|asc\|pgp\)' : '' "{{{2
+endif
+
+if !exists('g:tgpgWrite_symmetric')
+    let g:tgpgWrite_symmetric = '!%{GPG} %{G_OPTIONS} %{B_OPTIONS} %{PASSPHRASE} -o %{FILE} -c' "{{{2
     " let g:tgpgWrite_symmetric = '!gpg %{G_OPTIONS} %{B_OPTIONS} %{PASSPHRASE} -c'
 endif
-if !exists('g:tgpgRead_symmetric') "{{{2
-    let g:tgpgRead_symmetric = '!gpg %{G_OPTIONS} %{B_OPTIONS} %{PASSPHRASE} -d %{FILE}'
+
+if !exists('g:tgpgRead_symmetric')
+    let g:tgpgRead_symmetric = '!%{GPG} %{G_OPTIONS} %{B_OPTIONS} %{PASSPHRASE} -d %{FILE}' "{{{2
     " let g:tgpgRead_symmetric = '!gpg %{G_OPTIONS} %{B_OPTIONS} %{PASSPHRASE} -d'
 endif
 
-if !exists('g:tgpgPattern_encrypt') "{{{2
-    let g:tgpgPattern_encrypt = g:tgpgMode == 'encrypt' ? '*.\(gpg\|asc\|pgp\)' : ''
-endif
-if !exists('g:tgpgWrite_encrypt') "{{{2
-    let g:tgpgWrite_encrypt = '!gpg %{G_OPTIONS} %{RECIPIENTS} %{B_OPTIONS} -e -o %{FILE}'
-endif
-if !exists('g:tgpgRead_encrypt') "{{{2
-    let g:tgpgRead_encrypt = '!gpg %{G_OPTIONS} %{B_OPTIONS} %{PASSPHRASE} -d %{FILE}'
+if !exists('g:tgpgPattern_encrypt')
+    let g:tgpgPattern_encrypt = g:tgpgMode == 'encrypt' ? '*.\(gpg\|asc\|pgp\)' : '' "{{{2
 endif
 
-if !exists('g:tgpgPattern_clearsign') | let g:tgpgPattern_clearsign = '' | endif "{{{2
-if !exists('g:tgpgWrite_clearsign') "{{{2
-    " let g:tgpgWrite_clearsign = '!gpg %{G_OPTIONS} %{B_OPTIONS} %{RECIPIENTS} %{PASSPHRASE} -o %{FILE} --clearsign'
-    let g:tgpgWrite_clearsign = '!gpg %{G_OPTIONS} %{B_OPTIONS} %{PASSPHRASE} -o %{FILE} --clearsign'
+if !exists('g:tgpgWrite_encrypt')
+    let g:tgpgWrite_encrypt = '!%{GPG} %{G_OPTIONS} %{RECIPIENTS} %{B_OPTIONS} -e -o %{FILE}' "{{{2
 endif
+
+if !exists('g:tgpgRead_encrypt')
+    let g:tgpgRead_encrypt = '!%{GPG} %{G_OPTIONS} %{B_OPTIONS} %{PASSPHRASE} -d %{FILE}' "{{{2
+endif
+
+if !exists('g:tgpgPattern_clearsign')
+    let g:tgpgPattern_clearsign = '' "{{{2
+endif
+
+if !exists('g:tgpgWrite_clearsign')
+    let g:tgpgWrite_clearsign = '!%{GPG} %{G_OPTIONS} %{B_OPTIONS} %{PASSPHRASE} -o %{FILE} --clearsign' "{{{2
+    " let g:tgpgWrite_clearsign = '!gpg %{G_OPTIONS} %{B_OPTIONS} %{RECIPIENTS} %{PASSPHRASE} -o %{FILE} --clearsign'
+endif
+
 " if !exists('g:tgpgRead_clearsign') | let g:tgpgRead_clearsign = '!gpg %{G_OPTIONS} --verify %s' | endif
 
 " if !exists('g:tgpgPattern_sign') | let g:tgpgPattern_sign = '*.\(sig\)' | endif
 " if !exists('g:tgpgWrite_sign') | let g:tgpgWrite_sign = '!gpg %{G_OPTIONS} -r %s -s -o %s' | endif
 " " if !exists('g:tgpgRead_sign') | let g:tgpgDecrypt = '' | endif
 
-if !exists('g:tgpgOptions') "{{{2
+" :doc:
+" -----------------------------------------------------------------------
+" gpg options~
+
+if !exists('g:tgpgOptions')
+    " G_OPTIONS: The default options.
+    let g:tgpgOptions = '-q --no-secmem-warning' "{{{2
     " --no-mdc-warning
-    let g:tgpgOptions = '-q --no-secmem-warning'
-endif
-if !exists('g:tgpgCachePW')       | let g:tgpgCachePW = 2                         | endif "{{{2
-if !exists('g:tgpgBackup')        | let g:tgpgBackup = 1                          | endif "{{{2
-if !exists('g:tgpgCmdRecipient')  | let g:tgpgCmdRecipient = '-r "%s"'            | endif "{{{2
-if !exists('g:tgpgCmdPassphrase') | let g:tgpgCmdPassphrase = '--passphrase "%s"' | endif "{{{2
-if !exists('g:tgpgSepRecipient')  | let g:tgpgSepRecipient = ';|/&'               | endif "{{{2
-if !exists('g:tgpgShellQuote')    | let g:tgpgShellQuote = '&'.&shellxquote       | endif "{{{2
-if !exists('g:tgpgTempSuffix')    | let g:tgpgTempSuffix = '.~tGpg~'              | endif "{{{2
-if !exists('g:tgpgInputsecret')   | let g:tgpgInputsecret = 'inputsecret'         | endif "{{{2
-" if !exists('g:tgpgInputsecret')  | let g:tgpgInputsecret = 'input'         | endif
-
-" ROT13
-if !exists('g:tgpgRotTableA') "{{{2
-    let g:tgpgRotTableA = 'ABCEFGHIJKLMNOPQRSTUVWXYZabcefghijklmnopqrstuvwxyz'
-endif
-if !exists('g:tgpgRotTableB') "{{{2
-    let g:tgpgRotTableB = 'NOPQRSTUVWXYZABCEFGHIJKLMnopqrstuvwxyzabcefghijklm'
 endif
 
-command! TGpgResetCache let s:tgpgSecretCache = {}
-" command! TGpgShowCache echo string(s:tgpgSecretCache)
+if !exists('g:tgpgCmdRecipient')
+    " RECIPIENTS: How to pass recipients.
+    let g:tgpgCmdRecipient = '-r "%s"' "{{{2
+endif
+
+if !exists('g:tgpgSepRecipient')
+    " Separators the user may use when naming multiple recipients.
+    let g:tgpgSepRecipient = ';|/&' "{{{2
+endif
+
+if !exists('g:tgpgCmdPassphrase')
+    " PASSPHRASE: How to pass the passphrase.
+    let g:tgpgCmdPassphrase = '--passphrase "%s"' "{{{2
+endif
+
+if !exists('g:tgpgShellQuote')
+    " More characters that should be quoted.
+    let g:tgpgShellQuote = '&'.&shellxquote "{{{2
+endif
+
+if !exists('g:tgpgTempSuffix')
+    " The suffix for backups and temporary files.
+    let g:tgpgTempSuffix = '.~tGpg~' "{{{2
+endif
+
+if !exists('g:tgpgInputsecret')
+    " A function to input "secrets".
+    let g:tgpgInputsecret = 'inputsecret' "{{{2
+    " let g:tgpgInputsecret = 'input'
+endif
+
+
+let s:rotta = join(map(range(32,126), 'nr2char(v:val)'), '')
+let s:rottb = ''
+let s:rott_list = split(s:rotta, '\ze')
+let s:rott_n = localtime() % 79181
+while !empty(s:rott_list)
+    let s:rott_n = (97613 * s:rott_n) % 79181
+    if s:rott_n < 0
+        let s:rott_n = -s:rott_n
+    end
+    let s:rottb .= remove(s:rott_list, s:rott_n % len(s:rott_list))
+endwh
+unlet s:rott_list s:rott_n
+
+
+" :doc:
+" -----------------------------------------------------------------------
+" Commands and functions~
+
+command! TGpgResetCache let s:heights = {}
+" command! TGpgShowCache echo string(s:heights)
+" command! TGpgShowTable echo s:rottb
 TGpgResetCache
 
-fun! s:EscapeShellCmdChars(text) "{{{3
+let s:last_access = 0
+
+
+function! s:EscapeShellCmdChars(text) "{{{3
     return escape(a:text, '%#'. g:tgpgShellQuote)
 endf
 
-fun! s:EscapeFilename(file) "{{{3
+
+function! s:EscapeFilename(file) "{{{3
     return escape(a:file, ' ')
 endf
 
-fun! s:GetMode(mode) "{{{3
+
+function! s:GetMode(mode) "{{{3
     if empty(a:mode)
         return exists('b:tgpgMode') ? b:tgpgMode : g:tgpgMode
     else
@@ -108,7 +229,8 @@ fun! s:GetMode(mode) "{{{3
     endif
 endf
 
-fun! s:GetRecipients(iomode, default) "{{{3
+
+function! s:GetRecipients(iomode, default) "{{{3
     " TAssert IsList(a:default)
     call inputsave()
     let user = input('Recipients (seperated by ['.g:tgpgSepRecipient .']): ', join(a:default, g:tgpgSepRecipient[0].' '))
@@ -116,13 +238,15 @@ fun! s:GetRecipients(iomode, default) "{{{3
     return split(user, '['. g:tgpgSepRecipient .']\s*')
 endf
 
-fun! s:FormatRecipients(recipients) "{{{3
+
+function! s:FormatRecipients(recipients) "{{{3
     " TAssert IsList(a:recipients)
     let luser = map(copy(a:recipients), 'printf(g:tgpgCmdRecipient, v:val)')
     return join(luser, ' ')
 endf
 
-fun! s:GetPassphrase(iomode, default) "{{{3
+
+function! s:GetPassphrase(iomode, default) "{{{3
     " TAssert IsString(a:default)
     " TAssert IsExistent('*'.g:tgpgInputsecret)
     call inputsave()
@@ -144,7 +268,8 @@ fun! s:GetPassphrase(iomode, default) "{{{3
     return secret
 endf
 
-fun! s:CacheKey(id, file) "{{{3
+
+function! s:CacheKey(id, file) "{{{3
     " TAssert IsString(a:id)
     " TAssert IsString(a:file)
     if has('fname_case')
@@ -157,19 +282,34 @@ fun! s:CacheKey(id, file) "{{{3
     return rv
 endf
 
-fun! s:EncodeValue(value) "{{{3
-    return tr(string(a:value), g:tgpgRotTableA, g:tgpgRotTableB)
+
+function! s:EncodeValue(value) "{{{3
+    return tr(string(a:value), s:rotta, s:rottb)
 endf
 
-fun! s:DecodeValue(text) "{{{3
+
+function! s:DecodeValue(text) "{{{3
     " TAssert IsString(a:text)
-    return eval(tr(a:text, g:tgpgRotTableB, g:tgpgRotTableA))
+    return eval(tr(a:text, s:rottb, s:rotta))
 endf
 
-fun! s:GetCacheVar(id, file, default) "{{{3
+
+function! s:CheckTimeout() "{{{3
+    if !empty(s:heights)
+        let now = localtime()
+        if s:last_access && now - s:last_access > g:tgpg_timeout
+            TGpgResetCache
+        endif
+        let s:last_access = now
+    endif
+endf
+
+
+function! s:GetCacheVar(id, file, default) "{{{3
+    call s:CheckTimeout()
     let id = s:EncodeValue(s:CacheKey(a:id, a:file))
-    if has_key(s:tgpgSecretCache, id)
-        let rv = s:DecodeValue(s:tgpgSecretCache[id])
+    if has_key(s:heights, id)
+        let rv = s:DecodeValue(s:heights[id])
         " call TLog('GetCacheVar '. id .'='. rv)
         return rv
     else
@@ -178,13 +318,16 @@ fun! s:GetCacheVar(id, file, default) "{{{3
     endif
 endf
 
-fun! s:PutCacheVar(id, file, secret) "{{{3
+
+function! s:PutCacheVar(id, file, secret) "{{{3
+    call s:CheckTimeout()
     let id = s:CacheKey(a:id, a:file)
-    let s:tgpgSecretCache[s:EncodeValue(id)] = s:EncodeValue(a:secret)
+    let s:heights[s:EncodeValue(id)] = s:EncodeValue(a:secret)
     return a:secret
 endf
 
-fun! s:GetCache(id, file, default) "{{{3
+
+function! s:GetCache(id, file, default) "{{{3
     " TAssert IsString(a:id)
     let tgpgCachePW = exists('b:tgpgCachePW') ? b:tgpgCachePW : g:tgpgCachePW
     if tgpgCachePW
@@ -198,7 +341,8 @@ fun! s:GetCache(id, file, default) "{{{3
     return a:default
 endf
 
-fun! s:PutCache(id, file, secret) "{{{3
+
+function! s:PutCache(id, file, secret) "{{{3
     " TAssert IsString(a:id)
     let tgpgCachePW = exists('b:tgpgCachePW') ? b:tgpgCachePW : g:tgpgCachePW
     if tgpgCachePW && !empty(a:secret)
@@ -210,7 +354,8 @@ fun! s:PutCache(id, file, secret) "{{{3
     endif
 endf
 
-fun! s:CallInDestDir(autocommand, file, mode, FunRef, args) "{{{3
+
+function! s:CallInDestDir(autocommand, file, mode, FunRef, args) "{{{3
     if expand('%:p') != a:file
         let buf = bufnr('%')
         exec 'silent! buffer! '. bufnr(a:file)
@@ -232,6 +377,8 @@ fun! s:CallInDestDir(autocommand, file, mode, FunRef, args) "{{{3
         silent exec 'cd '. s:EscapeShellCmdChars(s:EscapeFilename(parms['hfile']))
         set bin
         set noswapfile
+        " set nobackup
+        " set nowritebackup
         if !exists('b:tgpgMode')
             let b:tgpgMode = a:mode
         endif
@@ -248,7 +395,8 @@ fun! s:CallInDestDir(autocommand, file, mode, FunRef, args) "{{{3
     endtry
 endf
 
-fun! s:TemplateValue(label) "{{{3
+
+function! s:TemplateValue(label) "{{{3
     " call TLog('TemplateValue: success='. s:templateSuccess)
     " TLog 'TemplateValue: '. a:label
     if s:templateSuccess
@@ -266,7 +414,8 @@ fun! s:TemplateValue(label) "{{{3
     return ''
 endf
 
-fun! s:ProcessTemplate(parms, iomode, template, vars) "{{{3
+
+function! s:ProcessTemplate(parms, iomode, template, vars) "{{{3
     " TAssert IsDictionary(a:parms)
     " TAssert IsString(a:iomode) && IsNotEmpty(a:iomode)
     " TAssert IsString(a:template) && IsNotEmpty(a:template)
@@ -289,17 +438,74 @@ fun! s:ProcessTemplate(parms, iomode, template, vars) "{{{3
     return rv
 endf
 
-fun! TGpgUserInput_G_OPTIONS(parms) "{{{3
+
+function! s:StandardOptions()
+    for [key, value] in items(g:tgpg_options)
+        let okey = 'option_'. key
+        exec 'let s:heights[okey] = &'. key
+        exec 'let &'. key ' = value'
+    endfor
+endf
+
+
+function! s:ResetOptions() "{{{3
+    for key in keys(g:tgpg_options)
+        let okey = 'option_'. key
+        if has_key(s:heights, okey)
+            exec 'let &'. key ' = s:heights[okey]'
+            unlet s:heights[okey]
+        endif
+    endfor
+endf
+
+
+function! s:SaveRegisters() "{{{3
+    for reg in split(g:tgpg_registers, '\zs')
+        let okey = 'register_'. reg
+        exec 'let s:heights[okey] = @'. reg
+    endfor
+endf
+
+
+function! s:ResetRegisters() "{{{3
+    for reg in split(g:tgpg_registers, '\zs')
+        let okey = 'register_'. reg
+        if has_key(s:heights, okey)
+            exec 'let @'. reg .' = s:heights[okey]'
+            unlet s:heights[okey]
+        endif
+    endfor
+endf
+
+
+function! TGpgUserInput_GPG(parms) "{{{3
+    if !empty(s:tgpg_gpg_md5_sum) && !empty(s:tgpg_gpg_md5_check)
+        let rv = system(s:tgpg_gpg_md5_check)
+        let sum = matchstr(rv, '^\w\+')
+        if sum != s:tgpg_gpg_md5_sum
+            echohl error
+            echom 'Wrong Checksum for '. s:tgpg_gpg_cmd .': '. sum .' ('. s:tgpg_gpg_md5_sum .')'
+            echohl NONE
+            return [0, '']
+        endif
+    endif
+    return [1, s:tgpg_gpg_cmd]
+endf
+
+
+function! TGpgUserInput_G_OPTIONS(parms) "{{{3
     return [1, g:tgpgOptions]
 endf
 
-fun! TGpgUserInput_B_OPTIONS(parms) "{{{3
+
+function! TGpgUserInput_B_OPTIONS(parms) "{{{3
     let id = a:parms['mode'] .'_'. a:parms['iomode']
     let rv = exists('b:tgpg_'. id .'_options') ? b:{a:id}_options : ''
     return [1, rv]
 endf
 
-fun! TGpgUserInput_PASSPHRASE(parms) "{{{3
+
+function! TGpgUserInput_PASSPHRASE(parms) "{{{3
     let id  = 'PW_'. a:parms['mode']
     " call TLog('TGpgUserInput_PASSPHRASE id='. id)
     " call TLog('TGpgUserInput_PASSPHRASE file='. a:parms['file'])
@@ -313,7 +519,8 @@ fun! TGpgUserInput_PASSPHRASE(parms) "{{{3
     return [0, '']
 endf
 
-fun! TGpgUserInput_RECIPIENTS(parms) "{{{3
+
+function! TGpgUserInput_RECIPIENTS(parms) "{{{3
     let default = s:GetCache('recipients', a:parms['file'], [])
     let recipients = s:GetRecipients(a:parms['iomode'], default)
     if !empty(recipients)
@@ -323,96 +530,117 @@ fun! TGpgUserInput_RECIPIENTS(parms) "{{{3
     return [0, '']
 endf
 
-fun! TGpgRead(parms, range) "{{{3
+
+function! TGpgRead(parms, range) "{{{3
     if !filereadable(a:parms['tfile'])
         return
     endif
-    let read = 0
-    if exists('g:tgpgRead_'. a:parms['mode'])
-        let args = {'FILE': s:EscapeFilename(a:parms['tfile'])}
-        " TLogVAR a:parms['tfile']
-        let cmd  = s:ProcessTemplate(a:parms, 'r', g:tgpgRead_{a:parms['mode']}, args)
-        if !empty(cmd)
-            " TLogVAR cmd
-            exec a:range . s:EscapeShellCmdChars(cmd)
-            let read = 1
+    call s:StandardOptions()
+    try
+        let read = 0
+        if exists('g:tgpgRead_'. a:parms['mode'])
+            let args = {'FILE': s:EscapeFilename(a:parms['tfile'])}
+            " TLogVAR a:parms['tfile']
+            let cmd  = s:ProcessTemplate(a:parms, 'r', g:tgpgRead_{a:parms['mode']}, args)
+            if !empty(cmd)
+                " TLogVAR cmd
+                exec a:range . s:EscapeShellCmdChars(cmd)
+                call s:SaveRegisters()
+                " au BufLeave <buffer> call s:ResetRegisters()
+                au BufUnload <buffer> call s:ResetRegisters()
+                let read = 1
+            endif
         endif
-    endif
-    if !read
-        exec a:range .'read '. s:EscapeShellCmdChars(s:EscapeFilename(a:parms['tfile']))
-    endif
+        if !read
+            exec a:range .'read '. s:EscapeShellCmdChars(s:EscapeFilename(a:parms['tfile']))
+        endif
+    finally
+        call s:ResetOptions()
+    endtry
     if a:parms['autocommand'] =~ '^Buf'
         " exec 'doautocmd BufRead '. s:EscapeFilename(expand("%"))
         exec 'doautocmd BufRead '. s:EscapeFilename(expand("%:r"))
     endif
 endf
 
-fun! TGpgWrite(parms) "{{{3
+
+function! TGpgWrite(parms) "{{{3
     if exists('g:tgpgWrite_'. a:parms['mode'])
-        " TLogVAR a:parms['tfile']
-        " TLogVAR a:parms['gfile']
-        let ftime = getftime(a:parms['tfile'])
-        let args = {'FILE': s:EscapeFilename(a:parms['tfile'])}
-        let cmd = s:ProcessTemplate(a:parms, 'w', g:tgpgWrite_{a:parms['mode']}, args)
-        if !empty(cmd)
-            " TLogVAR cmd
-            if filereadable(a:parms['tfile'])
-                call rename(a:parms['tfile'], a:parms['gfile'])
-            endif
-            let foldlevel = &foldlevel
-            try
-                setlocal foldlevel=99
-                silent %yank t
-                " TLog "'[,']". cmd
-                exec "'[,']". s:EscapeShellCmdChars(cmd)
-                silent norm! ggdG"tPGdd
+        call s:StandardOptions()
+        try
+            " TLogVAR a:parms['tfile']
+            " TLogVAR a:parms['gfile']
+            let ftime = getftime(a:parms['tfile'])
+            let args = {'FILE': s:EscapeFilename(a:parms['tfile'])}
+            let cmd = s:ProcessTemplate(a:parms, 'w', g:tgpgWrite_{a:parms['mode']}, args)
+            if !empty(cmd)
+                " TLogVAR cmd
                 if filereadable(a:parms['tfile'])
-                    if getfsize(a:parms['tfile']) == 0
-                        echom 'tGpg: File size is zero -- writing has failed.'
-                        if filereadable(a:parms['gfile'])
-                            echom 'tGpg: Reverting to old file.'
-                            call rename(a:parms['gfile'], a:parms['tfile'])
+                    call rename(a:parms['tfile'], a:parms['gfile'])
+                endif
+                let foldlevel = &foldlevel
+                try
+                    setlocal foldlevel=99
+                    silent %yank t
+                    " TLog "'[,']". cmd
+                    exec "'[,']". s:EscapeShellCmdChars(cmd)
+                    silent norm! ggdG"tPGdd
+                    if filereadable(a:parms['tfile'])
+                        if getfsize(a:parms['tfile']) == 0
+                            echom 'tGpg: File size is zero -- writing has failed.'
+                            if filereadable(a:parms['gfile'])
+                                echom 'tGpg: Reverting to old file.'
+                                call rename(a:parms['gfile'], a:parms['tfile'])
+                            endif
+                        else
+                            set nomodified
+                            if !g:tgpgBackup
+                                call delete(a:parms['gfile'])
+                            endif
                         endif
                     else
-                        set nomodified
-                        if !g:tgpgBackup
-                            call delete(a:parms['gfile'])
-                        endif
+                        echom 'tGpg: Reverting to old file.'
+                        call rename(a:parms['gfile'], a:parms['tfile'])
                     endif
-                else
-                    echom 'tGpg: Reverting to old file.'
-                    call rename(a:parms['gfile'], a:parms['tfile'])
-                endif
-            finally
-                let &foldlevel = foldlevel
-            endtry
-        else
-            echom 'tGpg: Aborted!'
-        endif
+                finally
+                    let &foldlevel = foldlevel
+                endtry
+            else
+                echom 'tGpg: Aborted!'
+            endif
+        finally
+            call s:ResetOptions()
+        endtry
     else
         exec "'[,']write ". s:EscapeShellCmdChars(s:EscapeFilename(a:parms['tfile']))
     endif
 endf
 
-fun! TGpgWrite_clearsign(parms) "{{{3
+
+function! TGpgWrite_clearsign(parms) "{{{3
     let iomode = empty(a:parms['autocommand']) ? 'W' : 'w'
     if exists('g:tgpgWrite_'. a:parms['mode'])
-        let args = {'FILE': s:EscapeFilename(a:parms['gfile'])}
-        let cmd = s:ProcessTemplate(a:parms, iomode, g:tgpgWrite_{a:parms['mode']}, args)
-        if !empty(cmd)
-            if filereadable(a:parms['gfile'])
+        call s:StandardOptions()
+        try
+            let args = {'FILE': s:EscapeFilename(a:parms['gfile'])}
+            let cmd = s:ProcessTemplate(a:parms, iomode, g:tgpgWrite_{a:parms['mode']}, args)
+            if !empty(cmd)
+                if filereadable(a:parms['gfile'])
+                    call delete(a:parms['gfile'])
+                endif
+                " TLog '%'. cmd
+                silent exec '%'. s:EscapeShellCmdChars(cmd)
+                " silent exec '0read '. s:EscapeShellCmdChars(s:EscapeFilename(a:parms['gfile']))
+                silent exec '%read '. s:EscapeShellCmdChars(s:EscapeFilename(a:parms['gfile']))
+                norm! ggdd
                 call delete(a:parms['gfile'])
+                exec 'write! '. s:EscapeShellCmdChars(s:EscapeFilename(a:parms['tfile']))
+            else
+                echom 'tGpg: Aborted!'
             endif
-            " TLog '%'. cmd
-            silent exec '%'. s:EscapeShellCmdChars(cmd)
-            " silent exec '0read '. s:EscapeShellCmdChars(s:EscapeFilename(a:parms['gfile']))
-            silent exec '%read '. s:EscapeShellCmdChars(s:EscapeFilename(a:parms['gfile']))
-            norm! ggdd
-            call delete(a:parms['gfile'])
-            exec 'write! '. s:EscapeShellCmdChars(s:EscapeFilename(a:parms['tfile']))
-        else
-            echom 'tGpg: Aborted!'
-        endif
+        finally
+            call s:ResetOptions()
+        endtry
     endif
 endf
 
@@ -452,6 +680,10 @@ augroup tGpg
             " exec 'autocmd FileAppendPost '. g:tgpgPattern_{g} .' call TGpgOutPost(expand("<afile>"))'
         endif
     endfor
+
+    if g:tgpg_timeout > 0
+        autocmd CursorHold,CursorHoldI,FocusGained,FocusLost call s:CheckTimeout()
+    endif
 augroup END
 
 " untested <+TBD+>
@@ -459,57 +691,6 @@ augroup END
 
 
 finish
-
-This plugin currently can do the following:
-
-    - encrypt symmetrically
-    - encrypt asymmetrically
-    - clearsign buffer contents
-
-I couldn't get any of the existing gpg plugins to work properly (windows 
-Gvim & cygwin gpg) and do all the things I wanted it to do, so I wrote 
-this one. The main purpose is to perform symmetric encryption (the 
-default) but it's flexible enough to do also clearsign and asymmetric 
-encryption.
-
-You can set g:tgpgMode or b:tgpgMode to 'encrypt' for switching to 
-asymmetric encryption as default. You can also control the use of 
-symmetric and asymmetric encryption by setting set 
-g:tgpgPattern_symmetric and g:tgpgPattern_encrypt.
-
-This plugin passes the passphrase on the command line to the gpg 
-programm. So, it could be possible that somebody makes the passphrase 
-show up in some command log. Under some circumstances it could also be 
-possible that some info (eg the recipients) is logged in your viminfo 
-file. If you clearsign a message, the plain text will be written to 
-disk. Ie, if you clearsign a gpg encrypted message, the text will 
-temporarily be written to disk as plain text -- please keep in mind the 
-vast range of possible consequences. If you don't like to pass 
-passphrases on the command line, you'd have to change the command 
-templates.
-
-This plugin uses the (Buf|File)(Read|Write)Cmd autocommand events to 
-write/read the file. I'm not sure how this works out with other plugins 
-using these events.
-
-As I don't like typing passphrases, this plugin caches all the 
-passphrases entered in rot13 encoded form in a script local variable. 
-This means that passphrases could be written to the swapfile, from where 
-somebody somehow could possibly do something ... Set g:tgpgCachePW to 1 
-(buffer-wise caching only) or 0 (no caching) to change this.
-
-This plugin was tested with Windows GVim & cygwin gpg 1.4.5 (using bash 
-as shell) as well as linux vim & gpg 1.4.5. It's possible (albeit  
-unlikely) that the use of a pure Windows version of gpg or cmd.exe as 
-shell doesn't work.  (Please report problems.)
-
-If you get a message telling you about gpg command line options instead 
-of the decrypted file, please check the value of g:tgpgShellQuote.
-
-If writing fails, it's possible that you end up with a corrupted or 
-empty file. That's why we make backups by default. Set g:tgpgBackup 
-to 0 to change this.
-
 
 CHANGE LOG:
 0.1
@@ -534,4 +715,17 @@ command template
 - Make sure we're in the right buffer
 - Enable buffer local command line options (eg 
 b:tgpgWrite_symmetric_*_options)
+
+0.4
+- Reset cached passwords after g:tgpg_timeout seconds without access
+- If g:tgpg_gpg_md5_sum is set, check gpg's checksum via 
+g:tgpg_gpg_md5_check before doing anything.
+- The gpg program must be configured via g:tgpg_gpg_cmd.
+- Make sure certain options (e.g., verbosefile, verbose) are set to 
+predefined values during read/write, see g:tgpg_options.
+- Reset registers when unloading the buffer (this should prevent 
+information copied to the clipboard to be written to the viminfo file; 
+as it may have unintended consequences, you can turn it off by setting 
+g:tgpg_registers to '')
+- randomized replacement tables for encryption
 
